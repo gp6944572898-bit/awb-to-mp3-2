@@ -40,9 +40,9 @@ object SystemDecoder {
 
     /**
      * Декодирует файл из [fd] и отдаёт PCM в [sink].
-     * [onProgress] получает долю 0..1 (примерно раз в секунду), если длительность известна.
+     * [onProgress] получает (сколько микросекунд звука обработано, общая длительность или 0) примерно 2 раза в секунду.
      */
-    fun decode(fd: FileDescriptor, sink: PcmSink, onProgress: (Double) -> Unit) {
+    fun decode(fd: FileDescriptor, sink: PcmSink, onProgress: (Long, Long) -> Unit) {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -113,9 +113,9 @@ object SystemDecoder {
                             sink.write(chunk, info.size)
 
                             val now = System.currentTimeMillis()
-                            if (durationUs > 0 && now - lastReport > 1000) {
+                            if (now - lastReport > 500) {
                                 lastReport = now
-                                onProgress((info.presentationTimeUs.toDouble() / durationUs).coerceIn(0.0, 1.0))
+                                onProgress(info.presentationTimeUs, durationUs)
                             }
                         }
                         idleAfterInput = 0

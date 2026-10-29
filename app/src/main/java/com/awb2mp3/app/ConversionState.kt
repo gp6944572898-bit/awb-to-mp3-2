@@ -10,6 +10,9 @@ object ConversionState {
     @Volatile var status: String = "Выберите файлы"
     @Volatile var progress: Int = 0
 
+    /** Момент старта текущей конвертации (мс) */
+    @Volatile var startedAt: Long = 0L
+
     private val logBuilder = StringBuilder()
 
     /** Подписчик (текущий экран); вызывается из любого потока */

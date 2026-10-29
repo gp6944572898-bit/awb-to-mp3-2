@@ -382,21 +382,49 @@ class MainActivity : Activity() {
         return names
     }
 
-    /** Обновляет статус, полосу и уведомление: файл [index] из [total], доля текущего файла [frac] */
-    private fun report(index: Int, total: Int, name: String, frac: Double) {
+    /** Время в виде 1:02:03 или 02:03 */
+    private fun fmtTime(totalSec: Long): String {
+        val t = if (totalSec < 0) 0 else totalSec
+        val h = t / 3600
+        val m = (t % 3600) / 60
+        val sec = t % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
+    }
+
+    /**
+     * Обновляет статус, полосу и уведомление.
+     * Файл [index] из [total]; [processedUs] и [durationUs] — сколько звука текущего файла
+     * уже обработано и сколько его всего (0, если неизвестно).
+     */
+    private fun report(index: Int, total: Int, name: String, processedUs: Long = 0, durationUs: Long = 0) {
+        val frac = if (durationUs > 0) (processedUs.toDouble() / durationUs).coerceIn(0.0, 1.0) else 0.0
         val percent = (((index + frac) / total) * 100).toInt().coerceIn(0, 100)
-        val part = if (frac > 0) " (${(frac * 100).toInt()}%)" else ""
-        val text = "Файл ${index + 1} из $total: $name$part"
-        ConversionState.status = text
+
+        val line1 = "Файл ${minOf(index + 1, total)} из $total"
+        val line2 = if (durationUs > 0)
+            "$name — ${(frac * 100).toInt()}% (${fmtTime(processedUs / 1_000_000)} из ${fmtTime(durationUs / 1_000_000)})"
+        else if (processedUs > 0)
+            "$name — обработано ${fmtTime(processedUs / 1_000_000)}"
+        else name
+
+        val elapsedSec = (System.currentTimeMillis() - ConversionState.startedAt) / 1000
+        val line3 = StringBuilder("Общий ход: $percent%, прошло ${fmtTime(elapsedSec)}")
+        if (percent in 2..99) {
+            val eta = elapsedSec * (100 - percent) / percent
+            line3.append(", осталось ≈ ${fmtTime(eta)}")
+        }
+
+        ConversionState.status = "$line1\n$line2\n$line3"
         ConversionState.progress = percent
         ConversionState.changed()
-        KeepAliveService.update(this, text, percent)
+        KeepAliveService.update(this, "$line1: $line2", percent)
     }
 
     private fun runConversion(uris: List<Uri>) {
         val bitrate = bitrates[bitrateSpinner.selectedItemPosition]
         ConversionState.clearLog()
         ConversionState.progress = 0
+        ConversionState.startedAt = System.currentTimeMillis()
         setBusy(true, "Подготовка…")
         requestNotificationPermission()
         KeepAliveService.start(this) // служба переднего плана: работа продолжится при выключенном экране
@@ -413,7 +441,7 @@ class MainActivity : Activity() {
 
                 items.forEachIndexed { index, (uri, name) ->
                     val base = name.substringBeforeLast('.')
-                    report(index, total, name, 0.0)
+                    report(index, total, name)
                     try {
                         if (SystemDecoder.isAmr(this, uri)) {
                             // «AWB» на самом деле AMR-WB/AMR-NB: декодирует Android, кодирует LAME
@@ -422,7 +450,7 @@ class MainActivity : Activity() {
                                 skipped++
                                 appendLog("↷ $outName — уже есть, пропущен")
                             } else {
-                                convertAmr(uri, outName, bitrate) { frac -> report(index, total, name, frac) }
+                                convertAmr(uri, outName, bitrate) { done, all -> report(index, total, name, done, all) }
                                 existing.add(outName)
                                 ok++
                                 appendLog("✓ $outName")
@@ -476,7 +504,7 @@ class MainActivity : Activity() {
                         failed++
                         appendLog("✗ $name — ${e.message}")
                     }
-                    report(index + 1, total, name, 0.0)
+                    report(index + 1, total, name)
                 }
             } catch (e: Exception) {
                 failed++
@@ -503,7 +531,7 @@ class MainActivity : Activity() {
     }
 
     /** Декодирует AMR-файл системой и на лету кодирует в MP3 (без больших временных файлов) */
-    private fun convertAmr(uri: Uri, outName: String, bitrate: Int, onProgress: (Double) -> Unit) {
+    private fun convertAmr(uri: Uri, outName: String, bitrate: Int, onProgress: (Long, Long) -> Unit) {
         val tmp = File(cacheDir, "out.mp3")
         var handle = 0L
         try {
