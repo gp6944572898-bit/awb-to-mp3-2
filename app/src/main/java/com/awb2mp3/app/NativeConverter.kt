@@ -9,6 +9,9 @@ class NativeConverter {
     /** Конвертирует трек [subsong] (с 1) в MP3. Возвращает null при успехе или текст ошибки */
     external fun convert(path: String, subsong: Int, out: String, bitrateKbps: Int): String?
 
+    /** Диагностика файла, который не открылся: заголовок и сообщения декодера */
+    external fun diagnose(path: String): String
+
     companion object {
         init {
             System.loadLibrary("awbconv")

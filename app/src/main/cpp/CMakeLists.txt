@@ -28,7 +28,7 @@ target_include_directories(vgmstream PUBLIC ${VGM_SRC})
 target_include_directories(vgmstream PRIVATE
     ${VGM_SRC}/base ${VGM_SRC}/coding ${VGM_SRC}/layout ${VGM_SRC}/meta ${VGM_SRC}/util
     ${VGM_DIR}/ext_includes)
-target_compile_definitions(vgmstream PRIVATE VGM_LOG_OUTPUT)
+target_compile_definitions(vgmstream PRIVATE VGM_LOG_OUTPUT VGM_USE_G7221 VGM_USE_G719 VGM_USE_ATRAC9)
 target_compile_options(vgmstream PRIVATE -w -O2 -fPIC)
 
 # ---- LAME (только кодировщик, без mpglib) ----

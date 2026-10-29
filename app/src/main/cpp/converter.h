@@ -9,4 +9,7 @@ int awb_count(const char* path);
 int awb_convert(const char* path, int subsong, const char* out_path, int bitrate_kbps,
                 char* err, int err_len);
 
+/* Текст диагностики для файла, который не открылся */
+void awb_diag(const char* path, char* out, int out_len);
+
 #endif

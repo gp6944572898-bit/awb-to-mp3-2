@@ -222,7 +222,7 @@ class MainActivity : Activity() {
                     val count = converter.count(input.absolutePath)
                     if (count < 0) {
                         failed++
-                        appendLog("✗ $name — формат не распознан")
+                        appendLog("✗ $name — формат не распознан\n   ${converter.diagnose(input.absolutePath)}")
                     } else {
                         for (s in 1..count) {
                             val outName = if (count == 1) "$base.mp3"

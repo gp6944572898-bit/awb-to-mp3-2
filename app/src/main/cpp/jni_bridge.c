@@ -17,11 +17,21 @@ Java_com_awb2mp3_app_NativeConverter_convert(JNIEnv* env, jobject thiz, jstring 
                                              jint subsong, jstring out, jint bitrate) {
     const char* p = (*env)->GetStringUTFChars(env, path, NULL);
     const char* o = (*env)->GetStringUTFChars(env, out, NULL);
-    char err[256] = {0};
+    char err[1400] = {0};
     int r = awb_convert(p, subsong, o, bitrate, err, (int)sizeof(err));
     (*env)->ReleaseStringUTFChars(env, path, p);
     (*env)->ReleaseStringUTFChars(env, out, o);
     if (r == 0)
         return NULL;
     return (*env)->NewStringUTF(env, err[0] ? err : "Неизвестная ошибка");
+}
+
+/* Диагностика файла, который не удалось открыть */
+JNIEXPORT jstring JNICALL
+Java_com_awb2mp3_app_NativeConverter_diagnose(JNIEnv* env, jobject thiz, jstring path) {
+    const char* p = (*env)->GetStringUTFChars(env, path, NULL);
+    char buf[1400] = {0};
+    awb_diag(p, buf, (int)sizeof(buf));
+    (*env)->ReleaseStringUTFChars(env, path, p);
+    return (*env)->NewStringUTF(env, buf);
 }
