@@ -12,9 +12,13 @@ int awb_convert(const char* path, int subsong, const char* out_path, int bitrate
 /* Текст диагностики для файла, который не открылся */
 void awb_diag(const char* path, char* out, int out_len);
 
-/* Кодирует сырой PCM (16 бит, little-endian, чередующиеся каналы) в MP3.
- * Нужен для файлов, которые декодирует сама система Android (например, AMR-WB). */
-int awb_encode_pcm(const char* pcm_path, int sample_rate, int channels, const char* out_path,
-                   int bitrate_kbps, char* err, int err_len);
+/* Потоковый кодировщик MP3: звук подаётся порциями (PCM 16 бит, little-endian, каналы чередуются).
+ * Нужен для файлов, которые декодирует сама система Android (например, AMR-WB):
+ * так не требуются огромные временные файлы для многочасовых аудиокниг. */
+typedef struct awb_enc awb_enc_t;
+
+awb_enc_t* awb_enc_open(const char* out_path, int sample_rate, int channels, int bitrate_kbps);
+int awb_enc_write(awb_enc_t* enc, const unsigned char* data, int bytes); /* 0 — ок, < 0 — ошибка */
+int awb_enc_close(awb_enc_t* enc);                                       /* дописывает хвост и закрывает */
 
 #endif

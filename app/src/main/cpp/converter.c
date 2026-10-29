@@ -192,81 +192,118 @@ void awb_diag(const char* path, char* out, int out_len) {
              size, hex, txt, g_log[0] ? g_log : "(пусто)");
 }
 
-int awb_encode_pcm(const char* pcm_path, int sample_rate, int channels, const char* out_path,
-                   int bitrate_kbps, char* err, int err_len) {
-    int result = -1;
-    FILE* in = NULL;
-    FILE* out = NULL;
-    lame_t lame = NULL;
-    short* pcm = NULL;
-    unsigned char* mp3_buf = NULL;
-    const int chunk = 4096; /* кадров за один проход */
-    const int mp3_size = (int)(1.25 * chunk + 7200);
+/* ---------- потоковый кодировщик PCM → MP3 ---------- */
 
-    if (channels < 1 || channels > 2 || sample_rate <= 0) {
-        set_err(err, err_len, "Неподдерживаемые параметры звука");
+struct awb_enc {
+    lame_t lame;
+    FILE* out;
+    int channels;
+    short* pcm;              /* выровненная копия входных данных */
+    size_t pcm_cap;          /* ёмкость pcm в сэмплах */
+    unsigned char carry[4];  /* неполный кадр, перенесённый на следующий вызов */
+    int carry_len;
+    unsigned char* mp3;
+    size_t mp3_cap;
+};
+
+awb_enc_t* awb_enc_open(const char* out_path, int sample_rate, int channels, int bitrate_kbps) {
+    if (channels < 1 || channels > 2 || sample_rate <= 0)
+        return NULL;
+
+    awb_enc_t* e = calloc(1, sizeof(*e));
+    if (!e)
+        return NULL;
+    e->channels = channels;
+    e->out = fopen(out_path, "wb");
+    e->lame = lame_init();
+    if (!e->out || !e->lame)
+        goto fail;
+
+    lame_set_in_samplerate(e->lame, sample_rate);
+    lame_set_num_channels(e->lame, channels);
+    lame_set_mode(e->lame, channels == 1 ? MONO : JOINT_STEREO);
+    lame_set_brate(e->lame, bitrate_kbps > 0 ? bitrate_kbps : 192);
+    lame_set_quality(e->lame, 5);
+    lame_set_bWriteVbrTag(e->lame, 0);
+    if (lame_init_params(e->lame) < 0)
+        goto fail;
+    return e;
+
+fail:
+    if (e->lame)
+        lame_close(e->lame);
+    if (e->out)
+        fclose(e->out);
+    free(e);
+    return NULL;
+}
+
+int awb_enc_write(awb_enc_t* e, const unsigned char* data, int bytes) {
+    if (!e || bytes < 0)
         return -1;
+    const int frame_bytes = 2 * e->channels;
+    size_t total = (size_t)e->carry_len + (size_t)bytes;
+    int frames = (int)(total / (size_t)frame_bytes);
+    if (frames == 0) {
+        memcpy(e->carry + e->carry_len, data, (size_t)bytes);
+        e->carry_len += bytes;
+        return 0;
     }
 
-    in = fopen(pcm_path, "rb");
-    out = fopen(out_path, "wb");
-    pcm = malloc((size_t)chunk * (size_t)channels * sizeof(short));
-    mp3_buf = malloc((size_t)mp3_size);
-    if (!in || !out || !pcm || !mp3_buf) {
-        set_err(err, err_len, "Не удалось открыть временные файлы");
-        goto done;
+    size_t need_pcm = (size_t)frames * (size_t)e->channels;
+    if (need_pcm > e->pcm_cap) {
+        short* p = realloc(e->pcm, need_pcm * sizeof(short));
+        if (!p)
+            return -1;
+        e->pcm = p;
+        e->pcm_cap = need_pcm;
     }
 
-    lame = lame_init();
-    if (!lame) {
-        set_err(err, err_len, "Не удалось инициализировать LAME");
-        goto done;
-    }
-    lame_set_in_samplerate(lame, sample_rate);
-    lame_set_num_channels(lame, channels);
-    lame_set_mode(lame, channels == 1 ? MONO : JOINT_STEREO);
-    lame_set_brate(lame, bitrate_kbps > 0 ? bitrate_kbps : 192);
-    lame_set_quality(lame, 5);
-    lame_set_bWriteVbrTag(lame, 0);
-    if (lame_init_params(lame) < 0) {
-        set_err(err, err_len, "LAME: неверные параметры кодирования");
-        goto done;
+    /* сначала хвост прошлого вызова, затем новые данные */
+    size_t used_bytes = (size_t)frames * (size_t)frame_bytes;
+    unsigned char* dst = (unsigned char*)e->pcm;
+    memcpy(dst, e->carry, (size_t)e->carry_len);
+    size_t from_new = used_bytes - (size_t)e->carry_len;
+    memcpy(dst + e->carry_len, data, from_new);
+
+    e->carry_len = (int)(total - used_bytes);
+    memcpy(e->carry, data + from_new, (size_t)e->carry_len);
+
+    size_t need_mp3 = (size_t)(1.25 * frames + 7200);
+    if (need_mp3 > e->mp3_cap) {
+        unsigned char* p = realloc(e->mp3, need_mp3);
+        if (!p)
+            return -1;
+        e->mp3 = p;
+        e->mp3_cap = need_mp3;
     }
 
-    for (;;) {
-        size_t frames = fread(pcm, sizeof(short) * (size_t)channels, (size_t)chunk, in);
-        if (frames == 0)
-            break;
-        int bytes;
-        if (channels == 1)
-            bytes = lame_encode_buffer(lame, pcm, pcm, (int)frames, mp3_buf, mp3_size);
-        else
-            bytes = lame_encode_buffer_interleaved(lame, pcm, (int)frames, mp3_buf, mp3_size);
-        if (bytes < 0) {
-            set_err(err, err_len, "Ошибка кодирования MP3");
-            goto done;
-        }
-        if (bytes > 0 && fwrite(mp3_buf, 1, (size_t)bytes, out) != (size_t)bytes) {
-            set_err(err, err_len, "Ошибка записи (нет места?)");
-            goto done;
-        }
-    }
+    int n;
+    if (e->channels == 1)
+        n = lame_encode_buffer(e->lame, e->pcm, e->pcm, frames, e->mp3, (int)e->mp3_cap);
+    else
+        n = lame_encode_buffer_interleaved(e->lame, e->pcm, frames, e->mp3, (int)e->mp3_cap);
+    if (n < 0)
+        return -1;
+    if (n > 0 && fwrite(e->mp3, 1, (size_t)n, e->out) != (size_t)n)
+        return -1;
+    return 0;
+}
 
-    {
-        int bytes = lame_encode_flush(lame, mp3_buf, mp3_size);
-        if (bytes > 0)
-            fwrite(mp3_buf, 1, (size_t)bytes, out);
-    }
-    result = 0;
+int awb_enc_close(awb_enc_t* e) {
+    if (!e)
+        return -1;
+    int result = 0;
 
-done:
-    if (lame)
-        lame_close(lame);
-    if (in)
-        fclose(in);
-    if (out)
-        fclose(out);
-    free(pcm);
-    free(mp3_buf);
+    unsigned char tail[8192];
+    int n = lame_encode_flush(e->lame, tail, (int)sizeof(tail));
+    if (n > 0 && fwrite(tail, 1, (size_t)n, e->out) != (size_t)n)
+        result = -1;
+    if (fclose(e->out) != 0)
+        result = -1;
+    lame_close(e->lame);
+    free(e->pcm);
+    free(e->mp3);
+    free(e);
     return result;
 }

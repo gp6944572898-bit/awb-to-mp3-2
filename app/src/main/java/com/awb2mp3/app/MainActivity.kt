@@ -1,11 +1,14 @@
 package com.awb2mp3.app
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -35,7 +38,7 @@ class MainActivity : Activity() {
     private lateinit var log: TextView
     private lateinit var logScroll: ScrollView
 
-    private val bitrates = listOf(128, 192, 256, 320)
+    private val bitrates = listOf(64, 96, 128, 192, 256, 320)
 
     /** Выбранная папка сохранения (null = Музыка/AWB2MP3 по умолчанию) */
     private var saveTree: Uri? = null
@@ -93,7 +96,7 @@ class MainActivity : Activity() {
                 android.R.layout.simple_spinner_dropdown_item,
                 bitrates
             )
-            setSelection(1)
+            setSelection(3) // 192
         }
         bitrateRow.addView(bitrateSpinner)
         root.addView(bitrateRow)
@@ -296,88 +299,186 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
+        }
+    }
+
+    /** Имена MP3, которые уже лежат в папке сохранения (для пропуска при повторном запуске) */
+    private fun existingNames(): MutableSet<String> {
+        val names = HashSet<String>()
+        try {
+            val tree = saveTree
+            if (tree == null) {
+                contentResolver.query(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    arrayOf(MediaStore.Audio.Media.DISPLAY_NAME),
+                    "${MediaStore.Audio.Media.RELATIVE_PATH} = ?",
+                    arrayOf("Music/AWB2MP3/"),
+                    null
+                )?.use { c ->
+                    while (c.moveToNext()) c.getString(0)?.let { names.add(it) }
+                }
+            } else {
+                val children = DocumentsContract.buildChildDocumentsUriUsingTree(
+                    tree, DocumentsContract.getTreeDocumentId(tree)
+                )
+                contentResolver.query(
+                    children, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null
+                )?.use { c ->
+                    while (c.moveToNext()) c.getString(0)?.let { names.add(it) }
+                }
+            }
+        } catch (e: Exception) {
+            // не получилось узнать — просто ничего не пропускаем
+        }
+        return names
+    }
+
+    /** Обновляет статус, полосу и уведомление: файл [index] из [total], доля текущего файла [frac] */
+    private fun report(index: Int, total: Int, name: String, frac: Double) {
+        val percent = (((index + frac) / total) * 100).toInt().coerceIn(0, 100)
+        val part = if (frac > 0) " (${(frac * 100).toInt()}%)" else ""
+        val text = "Файл ${index + 1} из $total: $name$part"
+        runOnUiThread {
+            status.text = text
+            progress.progress = percent
+        }
+        KeepAliveService.update(this, text, percent)
+    }
+
     private fun runConversion(uris: List<Uri>) {
         val bitrate = bitrates[bitrateSpinner.selectedItemPosition]
         log.text = ""
         progress.progress = 0
-        setBusy(true, "Конвертация…")
+        setBusy(true, "Подготовка…")
+        requestNotificationPermission()
+        KeepAliveService.start(this) // служба переднего плана: работа продолжится при выключенном экране
 
         worker.execute {
             var ok = 0
+            var skipped = 0
             var failed = 0
-            uris.forEachIndexed { index, uri ->
-                val name = displayName(uri)
-                val base = name.substringBeforeLast('.')
-                runOnUiThread { status.text = "Файл ${index + 1} из ${uris.size}: $name" }
+            try {
+                val existing = existingNames()
+                // обрабатываем по имени, чтобы главы шли по порядку
+                val items = uris.map { it to displayName(it) }.sortedBy { it.second.lowercase() }
+                val total = items.size
 
-                val input = File(cacheDir, "in_$index.awb")
-                try {
-                    contentResolver.openInputStream(uri)!!.use { src ->
-                        input.outputStream().use { dst -> src.copyTo(dst) }
-                    }
-
-                    if (SystemDecoder.isAmr(input.absolutePath)) {
-                        // «AWB» на самом деле AMR-WB/AMR-NB: декодирует Android, кодирует LAME
-                        val pcm = File(cacheDir, "pcm_$index.raw")
-                        val tmp = File(cacheDir, "out.mp3")
-                        try {
-                            val info = SystemDecoder.decodeToPcm(input.absolutePath, pcm)
-                            val error = converter.encodePcm(
-                                pcm.absolutePath, info.sampleRate, info.channels,
-                                tmp.absolutePath, bitrate
-                            )
-                            if (error == null) {
-                                saveFile(tmp, "$base.mp3")
-                                ok++
-                                appendLog("✓ $base.mp3")
+                items.forEachIndexed { index, (uri, name) ->
+                    val base = name.substringBeforeLast('.')
+                    report(index, total, name, 0.0)
+                    try {
+                        if (SystemDecoder.isAmr(this, uri)) {
+                            // «AWB» на самом деле AMR-WB/AMR-NB: декодирует Android, кодирует LAME
+                            val outName = "$base.mp3"
+                            if (outName in existing) {
+                                skipped++
+                                appendLog("↷ $outName — уже есть, пропущен")
                             } else {
-                                failed++
-                                appendLog("✗ $name — $error")
-                            }
-                        } finally {
-                            pcm.delete()
-                            tmp.delete()
-                        }
-                        runOnUiThread { progress.progress = (index + 1) * 100 / uris.size }
-                        return@forEachIndexed
-                    }
-
-                    val count = converter.count(input.absolutePath)
-                    if (count < 0) {
-                        failed++
-                        appendLog("✗ $name — формат не распознан\n   ${converter.diagnose(input.absolutePath)}")
-                    } else {
-                        for (s in 1..count) {
-                            val outName = if (count == 1) "$base.mp3"
-                            else "${base}_${s.toString().padStart(3, '0')}.mp3"
-                            val tmp = File(cacheDir, "out.mp3")
-                            val error = converter.convert(
-                                input.absolutePath, if (count == 1) 0 else s,
-                                tmp.absolutePath, bitrate
-                            )
-                            if (error == null) {
-                                saveFile(tmp, outName)
+                                convertAmr(uri, outName, bitrate) { frac -> report(index, total, name, frac) }
+                                existing.add(outName)
                                 ok++
                                 appendLog("✓ $outName")
-                            } else {
-                                failed++
-                                appendLog("✗ $outName — $error")
                             }
-                            tmp.delete()
+                        } else {
+                            val input = File(cacheDir, "in.awb")
+                            try {
+                                contentResolver.openInputStream(uri)!!.use { src ->
+                                    input.outputStream().use { dst -> src.copyTo(dst) }
+                                }
+                                val count = converter.count(input.absolutePath)
+                                if (count < 0) {
+                                    failed++
+                                    appendLog(
+                                        "✗ $name — формат не распознан\n   ${converter.diagnose(input.absolutePath)}"
+                                    )
+                                } else {
+                                    for (s in 1..count) {
+                                        val outName = if (count == 1) "$base.mp3"
+                                        else "${base}_${s.toString().padStart(3, '0')}.mp3"
+                                        if (outName in existing) {
+                                            skipped++
+                                            appendLog("↷ $outName — уже есть, пропущен")
+                                            continue
+                                        }
+                                        val tmp = File(cacheDir, "out.mp3")
+                                        try {
+                                            val error = converter.convert(
+                                                input.absolutePath, if (count == 1) 0 else s,
+                                                tmp.absolutePath, bitrate
+                                            )
+                                            if (error == null) {
+                                                saveFile(tmp, outName)
+                                                existing.add(outName)
+                                                ok++
+                                                appendLog("✓ $outName")
+                                            } else {
+                                                failed++
+                                                appendLog("✗ $outName — $error")
+                                            }
+                                        } finally {
+                                            tmp.delete()
+                                        }
+                                    }
+                                }
+                            } finally {
+                                input.delete()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        failed++
+                        appendLog("✗ $name — ${e.message}")
+                    }
+                    report(index + 1, total, name, 0.0)
+                }
+            } catch (e: Exception) {
+                failed++
+                appendLog("✗ Ошибка: ${e.message}")
+            } finally {
+                val summary = "Сохранено: $ok, пропущено: $skipped, ошибок: $failed. Папка: ${saveLabel()}"
+                KeepAliveService.stop(this)
+                KeepAliveService.showDone(this, summary)
+                runOnUiThread {
+                    progress.progress = 100
+                    setBusy(false, "Готово. $summary")
+                }
+            }
+        }
+    }
+
+    /** Декодирует AMR-файл системой и на лету кодирует в MP3 (без больших временных файлов) */
+    private fun convertAmr(uri: Uri, outName: String, bitrate: Int, onProgress: (Double) -> Unit) {
+        val tmp = File(cacheDir, "out.mp3")
+        var handle = 0L
+        try {
+            val pfd = contentResolver.openFileDescriptor(uri, "r")
+                ?: throw IllegalStateException("не удалось открыть файл")
+            pfd.use {
+                SystemDecoder.decode(it.fileDescriptor, object : PcmSink {
+                    override fun start(sampleRate: Int, channels: Int) {
+                        handle = converter.encoderOpen(tmp.absolutePath, sampleRate, channels, bitrate)
+                        if (handle == 0L) throw IllegalStateException("не удалось запустить кодировщик MP3")
+                    }
+
+                    override fun write(data: ByteArray, size: Int) {
+                        if (converter.encoderWrite(handle, data, size) < 0) {
+                            throw IllegalStateException("ошибка кодирования или записи (нет места?)")
                         }
                     }
-                } catch (e: Exception) {
-                    failed++
-                    appendLog("✗ $name — ${e.message}")
-                } finally {
-                    input.delete()
-                }
-                runOnUiThread { progress.progress = (index + 1) * 100 / uris.size }
+                }, onProgress)
             }
-
-            runOnUiThread {
-                setBusy(false, "Готово: сохранено $ok, ошибок $failed. Папка: ${saveLabel()}")
-            }
+            if (handle == 0L) throw IllegalStateException("в файле нет звука")
+            val h = handle
+            handle = 0L
+            if (converter.encoderClose(h) < 0) throw IllegalStateException("ошибка записи MP3")
+            saveFile(tmp, outName)
+        } finally {
+            if (handle != 0L) converter.encoderClose(handle)
+            tmp.delete()
         }
     }
 
@@ -393,8 +494,17 @@ class MainActivity : Activity() {
         )
         val target = DocumentsContract.createDocument(contentResolver, parent, "audio/mpeg", displayName)
             ?: throw IllegalStateException("не удалось создать файл в выбранной папке")
-        contentResolver.openOutputStream(target)!!.use { out ->
-            file.inputStream().use { it.copyTo(out) }
+        try {
+            contentResolver.openOutputStream(target)!!.use { out ->
+                file.inputStream().use { it.copyTo(out) }
+            }
+        } catch (e: Exception) {
+            // недописанный файл не оставляем, иначе при повторном запуске он будет считаться готовым
+            try {
+                DocumentsContract.deleteDocument(contentResolver, target)
+            } catch (ignored: Exception) {
+            }
+            throw e
         }
     }
 
@@ -408,8 +518,13 @@ class MainActivity : Activity() {
         }
         val target = contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
             ?: throw IllegalStateException("не удалось создать файл в Музыке")
-        contentResolver.openOutputStream(target)!!.use { out ->
-            file.inputStream().use { it.copyTo(out) }
+        try {
+            contentResolver.openOutputStream(target)!!.use { out ->
+                file.inputStream().use { it.copyTo(out) }
+            }
+        } catch (e: Exception) {
+            contentResolver.delete(target, null, null)
+            throw e
         }
         values.clear()
         values.put(MediaStore.Audio.Media.IS_PENDING, 0)
@@ -425,6 +540,7 @@ class MainActivity : Activity() {
         private const val REQ_FILES = 1
         private const val REQ_FOLDER = 2
         private const val REQ_SAVE = 3
+        private const val REQ_NOTIF = 4
         private const val PREF_SAVE_TREE = "save_tree"
     }
 }

@@ -9,8 +9,10 @@ class NativeConverter {
     /** Конвертирует трек [subsong] (с 1) в MP3. Возвращает null при успехе или текст ошибки */
     external fun convert(path: String, subsong: Int, out: String, bitrateKbps: Int): String?
 
-    /** Кодирует сырой PCM16 в MP3. Возвращает null при успехе или текст ошибки */
-    external fun encodePcm(pcmPath: String, sampleRate: Int, channels: Int, out: String, bitrateKbps: Int): String?
+    /** Потоковый MP3-кодировщик: открыть (0 = ошибка), записать порцию PCM16, закрыть */
+    external fun encoderOpen(out: String, sampleRate: Int, channels: Int, bitrateKbps: Int): Long
+    external fun encoderWrite(handle: Long, pcm: ByteArray, len: Int): Int
+    external fun encoderClose(handle: Long): Int
 
     /** Диагностика файла, который не открылся: заголовок и сообщения декодера */
     external fun diagnose(path: String): String
