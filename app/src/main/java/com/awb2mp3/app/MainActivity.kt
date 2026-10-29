@@ -39,8 +39,8 @@ class MainActivity : Activity() {
     private lateinit var log: TextView
     private lateinit var logScroll: ScrollView
 
-    /** Варианты битрейта; 0 = «Авто»: для речи (AMR) около 32 кбит/с, для музыки 192 */
-    private val bitrates = listOf(0, 24, 32, 48, 64, 96, 128, 192, 256, 320)
+    /** Варианты битрейта; 0 = «Авто»: для речи (AMR) как у исходного файла, для музыки 192 */
+    private val bitrates = listOf(0, 16, 24, 32, 48, 64, 96, 128, 192, 256, 320)
 
     /** Выбранная папка сохранения (null = Музыка/AWB2MP3 по умолчанию) */
     private var saveTree: Uri? = null
@@ -125,7 +125,7 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                bitrates.map { if (it == 0) "Авто (мало места)" else it.toString() }
+                bitrates.map { if (it == 0) "Авто (как у исходника)" else it.toString() }
             )
             setSelection(0)
         }
@@ -491,6 +491,17 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Битрейт исходного файла (размер ÷ длительность), округлённый до ближайшего
+     * допустимого для MP3 на 8–16 кГц. Если длительность неизвестна — 32 кбит/с.
+     */
+    private fun sourceBitrateKbps(sizeBytes: Long, durationUs: Long): Int {
+        val allowed = listOf(16, 24, 32, 40, 48, 56, 64)
+        if (sizeBytes <= 0 || durationUs <= 0) return 32
+        val kbps = sizeBytes * 8.0 / (durationUs / 1_000_000.0) / 1000.0
+        return allowed.minByOrNull { Math.abs(it - kbps) } ?: 32
+    }
+
     /** Декодирует AMR-файл системой и на лету кодирует в MP3 (без больших временных файлов) */
     private fun convertAmr(uri: Uri, outName: String, bitrate: Int, onProgress: (Double) -> Unit) {
         val tmp = File(cacheDir, "out.mp3")
@@ -498,11 +509,12 @@ class MainActivity : Activity() {
         try {
             val pfd = contentResolver.openFileDescriptor(uri, "r")
                 ?: throw IllegalStateException("не удалось открыть файл")
+            val sourceSize = pfd.statSize
             pfd.use {
                 SystemDecoder.decode(it.fileDescriptor, object : PcmSink {
-                    override fun start(sampleRate: Int, channels: Int) {
-                        // «Авто»: речь кодируем экономно — размер MP3 близок к исходному AMR
-                        val kbps = if (bitrate > 0) bitrate else if (sampleRate >= 16000) 32 else 16
+                    override fun start(sampleRate: Int, channels: Int, durationUs: Long) {
+                        // «Авто»: берём битрейт исходника, чтобы размер MP3 был близок к размеру AMR
+                        val kbps = if (bitrate > 0) bitrate else sourceBitrateKbps(sourceSize, durationUs)
                         handle = converter.encoderOpen(tmp.absolutePath, sampleRate, channels, kbps)
                         if (handle == 0L) throw IllegalStateException("не удалось запустить кодировщик MP3")
                     }

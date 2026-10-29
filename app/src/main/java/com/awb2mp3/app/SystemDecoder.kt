@@ -9,8 +9,8 @@ import java.io.FileDescriptor
 
 /** Приёмник декодированного звука (PCM 16 бит) */
 interface PcmSink {
-    /** Вызывается один раз перед первой порцией данных */
-    fun start(sampleRate: Int, channels: Int)
+    /** Вызывается один раз перед первой порцией данных; [durationUs] — длительность (0, если неизвестна) */
+    fun start(sampleRate: Int, channels: Int, durationUs: Long)
 
     fun write(data: ByteArray, size: Int)
 }
@@ -102,7 +102,7 @@ object SystemDecoder {
                     outIndex >= 0 -> {
                         if (info.size > 0) {
                             if (!started) {
-                                sink.start(rate, channels)
+                                sink.start(rate, channels, durationUs)
                                 started = true
                             }
                             val outBuf = decoder.getOutputBuffer(outIndex)!!
