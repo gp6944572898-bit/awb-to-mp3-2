@@ -79,6 +79,7 @@ object SystemDecoder {
             var started = false
             var lastReport = 0L
             var chunk = ByteArray(32 * 1024)
+            var idleAfterInput = 0 // сколько раз подряд декодер ничего не вернул после конца входа
 
             while (!outputDone) {
                 if (!inputDone) {
@@ -117,10 +118,15 @@ object SystemDecoder {
                                 onProgress((info.presentationTimeUs.toDouble() / durationUs).coerceIn(0.0, 1.0))
                             }
                         }
+                        idleAfterInput = 0
                         decoder.releaseOutputBuffer(outIndex, false)
                         if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                             outputDone = true
                         }
+                    }
+                    outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                        // некоторые декодеры не присылают флаг конца потока — не ждём вечно
+                        if (inputDone && ++idleAfterInput > 500) outputDone = true
                     }
                     outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         val nf = decoder.outputFormat

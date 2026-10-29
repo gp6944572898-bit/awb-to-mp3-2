@@ -21,6 +21,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -53,6 +54,35 @@ class MainActivity : Activity() {
         saveTree = loadSaveTree()
         buildUi()
         updateSaveButton()
+        render()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // экран мог быть пересоздан, пока шла конвертация, — показываем актуальное состояние
+        ConversionState.listener = { runOnUiThread { render() } }
+        render()
+    }
+
+    override fun onPause() {
+        ConversionState.listener = null
+        super.onPause()
+    }
+
+    /** Отображает общее состояние конвертации (статус, прогресс, журнал, доступность кнопок) */
+    private fun render() {
+        val busy = ConversionState.busy
+        btnFiles.isEnabled = !busy
+        btnFolder.isEnabled = !busy
+        btnSave.isEnabled = !busy
+        bitrateSpinner.isEnabled = !busy
+        status.text = ConversionState.status
+        progress.progress = ConversionState.progress
+        val text = ConversionState.logText()
+        if (log.text.toString() != text) {
+            log.text = text
+            logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+        }
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -173,10 +203,12 @@ class MainActivity : Activity() {
                 } else {
                     data.data?.let { uris.add(it) }
                 }
+                for (u in uris) keepAccess(u)
                 askAndStart(uris)
             }
             REQ_FOLDER -> {
                 val tree = data.data ?: return
+                keepAccess(tree)
                 setBusy(true, "Ищу AWB в папке…")
                 worker.execute {
                     val found = mutableListOf<Uri>()
@@ -212,18 +244,24 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Просим систему сохранить доступ к выбранному файлу/папке, пока идёт долгая конвертация */
+    private fun keepAccess(uri: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (e: Exception) {
+            // не все источники поддерживают — тогда достаточно временного доступа
+        }
+    }
+
     private fun setBusy(busy: Boolean, text: String) {
-        btnFiles.isEnabled = !busy
-        btnFolder.isEnabled = !busy
-        bitrateSpinner.isEnabled = !busy
-        if (text.isNotEmpty()) status.text = text
+        ConversionState.busy = busy
+        if (text.isNotEmpty()) ConversionState.status = text
+        ConversionState.changed()
     }
 
     private fun appendLog(line: String) {
-        runOnUiThread {
-            log.append(line + "\n")
-            logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
-        }
+        ConversionState.addLog(line)
+        ConversionState.changed()
     }
 
     private fun displayName(uri: Uri): String {
@@ -280,9 +318,14 @@ class MainActivity : Activity() {
 
     /** Перед стартом конвертации спрашиваем, куда сохранять */
     private fun askAndStart(uris: List<Uri>) {
+        if (ConversionState.busy) {
+            Toast.makeText(this, "Конвертация уже идёт", Toast.LENGTH_SHORT).show()
+            return
+        }
         if (uris.isEmpty()) {
             pendingUris = emptyList()
-            status.text = "Файлы AWB не найдены"
+            ConversionState.status = "Файлы AWB не найдены"
+            ConversionState.changed()
             return
         }
         pendingUris = uris
@@ -343,17 +386,16 @@ class MainActivity : Activity() {
         val percent = (((index + frac) / total) * 100).toInt().coerceIn(0, 100)
         val part = if (frac > 0) " (${(frac * 100).toInt()}%)" else ""
         val text = "Файл ${index + 1} из $total: $name$part"
-        runOnUiThread {
-            status.text = text
-            progress.progress = percent
-        }
+        ConversionState.status = text
+        ConversionState.progress = percent
+        ConversionState.changed()
         KeepAliveService.update(this, text, percent)
     }
 
     private fun runConversion(uris: List<Uri>) {
         val bitrate = bitrates[bitrateSpinner.selectedItemPosition]
-        log.text = ""
-        progress.progress = 0
+        ConversionState.clearLog()
+        ConversionState.progress = 0
         setBusy(true, "Подготовка…")
         requestNotificationPermission()
         KeepAliveService.start(this) // служба переднего плана: работа продолжится при выключенном экране
@@ -442,10 +484,8 @@ class MainActivity : Activity() {
                 val summary = "Сохранено: $ok, пропущено: $skipped, ошибок: $failed. Папка: ${saveLabel()}"
                 KeepAliveService.stop(this)
                 KeepAliveService.showDone(this, summary)
-                runOnUiThread {
-                    progress.progress = 100
-                    setBusy(false, "Готово. $summary")
-                }
+                ConversionState.progress = 100
+                setBusy(false, "Готово. $summary")
             }
         }
     }
