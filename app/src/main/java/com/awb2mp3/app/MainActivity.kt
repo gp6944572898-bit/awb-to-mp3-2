@@ -39,7 +39,8 @@ class MainActivity : Activity() {
     private lateinit var log: TextView
     private lateinit var logScroll: ScrollView
 
-    private val bitrates = listOf(64, 96, 128, 192, 256, 320)
+    /** Варианты битрейта; 0 = «Авто»: для речи (AMR) около 32 кбит/с, для музыки 192 */
+    private val bitrates = listOf(0, 24, 32, 48, 64, 96, 128, 192, 256, 320)
 
     /** Выбранная папка сохранения (null = Музыка/AWB2MP3 по умолчанию) */
     private var saveTree: Uri? = null
@@ -124,9 +125,9 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                bitrates
+                bitrates.map { if (it == 0) "Авто (мало места)" else it.toString() }
             )
-            setSelection(3) // 192
+            setSelection(0)
         }
         bitrateRow.addView(bitrateSpinner)
         root.addView(bitrateRow)
@@ -500,7 +501,9 @@ class MainActivity : Activity() {
             pfd.use {
                 SystemDecoder.decode(it.fileDescriptor, object : PcmSink {
                     override fun start(sampleRate: Int, channels: Int) {
-                        handle = converter.encoderOpen(tmp.absolutePath, sampleRate, channels, bitrate)
+                        // «Авто»: речь кодируем экономно — размер MP3 близок к исходному AMR
+                        val kbps = if (bitrate > 0) bitrate else if (sampleRate >= 16000) 32 else 16
+                        handle = converter.encoderOpen(tmp.absolutePath, sampleRate, channels, kbps)
                         if (handle == 0L) throw IllegalStateException("не удалось запустить кодировщик MP3")
                     }
 
