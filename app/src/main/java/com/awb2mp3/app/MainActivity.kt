@@ -316,6 +316,32 @@ class MainActivity : Activity() {
                         input.outputStream().use { dst -> src.copyTo(dst) }
                     }
 
+                    if (SystemDecoder.isAmr(input.absolutePath)) {
+                        // «AWB» на самом деле AMR-WB/AMR-NB: декодирует Android, кодирует LAME
+                        val pcm = File(cacheDir, "pcm_$index.raw")
+                        val tmp = File(cacheDir, "out.mp3")
+                        try {
+                            val info = SystemDecoder.decodeToPcm(input.absolutePath, pcm)
+                            val error = converter.encodePcm(
+                                pcm.absolutePath, info.sampleRate, info.channels,
+                                tmp.absolutePath, bitrate
+                            )
+                            if (error == null) {
+                                saveFile(tmp, "$base.mp3")
+                                ok++
+                                appendLog("✓ $base.mp3")
+                            } else {
+                                failed++
+                                appendLog("✗ $name — $error")
+                            }
+                        } finally {
+                            pcm.delete()
+                            tmp.delete()
+                        }
+                        runOnUiThread { progress.progress = (index + 1) * 100 / uris.size }
+                        return@forEachIndexed
+                    }
+
                     val count = converter.count(input.absolutePath)
                     if (count < 0) {
                         failed++

@@ -191,3 +191,82 @@ void awb_diag(const char* path, char* out, int out_len) {
     snprintf(out, (size_t)out_len, "размер=%ld, заголовок: %s| \"%s\" | лог: %s",
              size, hex, txt, g_log[0] ? g_log : "(пусто)");
 }
+
+int awb_encode_pcm(const char* pcm_path, int sample_rate, int channels, const char* out_path,
+                   int bitrate_kbps, char* err, int err_len) {
+    int result = -1;
+    FILE* in = NULL;
+    FILE* out = NULL;
+    lame_t lame = NULL;
+    short* pcm = NULL;
+    unsigned char* mp3_buf = NULL;
+    const int chunk = 4096; /* кадров за один проход */
+    const int mp3_size = (int)(1.25 * chunk + 7200);
+
+    if (channels < 1 || channels > 2 || sample_rate <= 0) {
+        set_err(err, err_len, "Неподдерживаемые параметры звука");
+        return -1;
+    }
+
+    in = fopen(pcm_path, "rb");
+    out = fopen(out_path, "wb");
+    pcm = malloc((size_t)chunk * (size_t)channels * sizeof(short));
+    mp3_buf = malloc((size_t)mp3_size);
+    if (!in || !out || !pcm || !mp3_buf) {
+        set_err(err, err_len, "Не удалось открыть временные файлы");
+        goto done;
+    }
+
+    lame = lame_init();
+    if (!lame) {
+        set_err(err, err_len, "Не удалось инициализировать LAME");
+        goto done;
+    }
+    lame_set_in_samplerate(lame, sample_rate);
+    lame_set_num_channels(lame, channels);
+    lame_set_mode(lame, channels == 1 ? MONO : JOINT_STEREO);
+    lame_set_brate(lame, bitrate_kbps > 0 ? bitrate_kbps : 192);
+    lame_set_quality(lame, 5);
+    lame_set_bWriteVbrTag(lame, 0);
+    if (lame_init_params(lame) < 0) {
+        set_err(err, err_len, "LAME: неверные параметры кодирования");
+        goto done;
+    }
+
+    for (;;) {
+        size_t frames = fread(pcm, sizeof(short) * (size_t)channels, (size_t)chunk, in);
+        if (frames == 0)
+            break;
+        int bytes;
+        if (channels == 1)
+            bytes = lame_encode_buffer(lame, pcm, pcm, (int)frames, mp3_buf, mp3_size);
+        else
+            bytes = lame_encode_buffer_interleaved(lame, pcm, (int)frames, mp3_buf, mp3_size);
+        if (bytes < 0) {
+            set_err(err, err_len, "Ошибка кодирования MP3");
+            goto done;
+        }
+        if (bytes > 0 && fwrite(mp3_buf, 1, (size_t)bytes, out) != (size_t)bytes) {
+            set_err(err, err_len, "Ошибка записи (нет места?)");
+            goto done;
+        }
+    }
+
+    {
+        int bytes = lame_encode_flush(lame, mp3_buf, mp3_size);
+        if (bytes > 0)
+            fwrite(mp3_buf, 1, (size_t)bytes, out);
+    }
+    result = 0;
+
+done:
+    if (lame)
+        lame_close(lame);
+    if (in)
+        fclose(in);
+    if (out)
+        fclose(out);
+    free(pcm);
+    free(mp3_buf);
+    return result;
+}

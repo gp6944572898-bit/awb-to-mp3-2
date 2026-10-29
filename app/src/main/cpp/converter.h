@@ -12,4 +12,9 @@ int awb_convert(const char* path, int subsong, const char* out_path, int bitrate
 /* Текст диагностики для файла, который не открылся */
 void awb_diag(const char* path, char* out, int out_len);
 
+/* Кодирует сырой PCM (16 бит, little-endian, чередующиеся каналы) в MP3.
+ * Нужен для файлов, которые декодирует сама система Android (например, AMR-WB). */
+int awb_encode_pcm(const char* pcm_path, int sample_rate, int channels, const char* out_path,
+                   int bitrate_kbps, char* err, int err_len);
+
 #endif

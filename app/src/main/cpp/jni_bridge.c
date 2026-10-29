@@ -35,3 +35,18 @@ Java_com_awb2mp3_app_NativeConverter_diagnose(JNIEnv* env, jobject thiz, jstring
     (*env)->ReleaseStringUTFChars(env, path, p);
     return (*env)->NewStringUTF(env, buf);
 }
+
+/* Кодирование готового PCM в MP3; null при успехе, иначе текст ошибки */
+JNIEXPORT jstring JNICALL
+Java_com_awb2mp3_app_NativeConverter_encodePcm(JNIEnv* env, jobject thiz, jstring pcm,
+                                               jint rate, jint channels, jstring out, jint bitrate) {
+    const char* p = (*env)->GetStringUTFChars(env, pcm, NULL);
+    const char* o = (*env)->GetStringUTFChars(env, out, NULL);
+    char err[256] = {0};
+    int r = awb_encode_pcm(p, rate, channels, o, bitrate, err, (int)sizeof(err));
+    (*env)->ReleaseStringUTFChars(env, pcm, p);
+    (*env)->ReleaseStringUTFChars(env, out, o);
+    if (r == 0)
+        return NULL;
+    return (*env)->NewStringUTF(env, err[0] ? err : "Неизвестная ошибка");
+}
