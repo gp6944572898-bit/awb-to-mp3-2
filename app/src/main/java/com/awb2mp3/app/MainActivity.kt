@@ -1,8 +1,10 @@
 package com.awb2mp3.app
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
@@ -24,6 +26,7 @@ class MainActivity : Activity() {
     private val converter by lazy { NativeConverter() }
     private val worker = Executors.newSingleThreadExecutor()
 
+    private lateinit var btnSave: Button
     private lateinit var btnFiles: Button
     private lateinit var btnFolder: Button
     private lateinit var bitrateSpinner: Spinner
@@ -34,9 +37,19 @@ class MainActivity : Activity() {
 
     private val bitrates = listOf(128, 192, 256, 320)
 
+    /** Выбранная папка сохранения (null = Музыка/AWB2MP3 по умолчанию) */
+    private var saveTree: Uri? = null
+
+    /** Файлы, ожидающие старта конвертации (пока пользователь выбирает папку) */
+    private var pendingUris: List<Uri> = emptyList()
+
+    private val prefs: SharedPreferences by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        saveTree = loadSaveTree()
         buildUi()
+        updateSaveButton()
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -51,11 +64,11 @@ class MainActivity : Activity() {
             text = "AWB → MP3"
             textSize = 24f
         })
-        root.addView(TextView(this).apply {
-            text = "Готовые файлы сохраняются в папку Музыка/AWB2MP3"
-            textSize = 14f
-            setPadding(0, dp(4), 0, dp(16))
-        })
+        btnSave = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener { pickSaveFolder() }
+        }
+        root.addView(btnSave)
 
         btnFiles = Button(this).apply {
             text = "Выбрать файлы AWB"
@@ -124,6 +137,28 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == REQ_SAVE) {
+            val tree = data?.data
+            if (resultCode == RESULT_OK && tree != null) {
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        tree,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                    // разрешение будет действовать до закрытия приложения
+                }
+                saveTree = tree
+                prefs.edit().putString(PREF_SAVE_TREE, tree.toString()).apply()
+                updateSaveButton()
+            }
+            // если выбор папки был открыт из диалога старта — возвращаемся к нему
+            val pending = pendingUris
+            if (pending.isNotEmpty()) askAndStart(pending)
+            return
+        }
+
         if (resultCode != RESULT_OK || data == null) return
 
         when (requestCode) {
@@ -135,7 +170,7 @@ class MainActivity : Activity() {
                 } else {
                     data.data?.let { uris.add(it) }
                 }
-                startConversion(uris)
+                askAndStart(uris)
             }
             REQ_FOLDER -> {
                 val tree = data.data ?: return
@@ -145,7 +180,7 @@ class MainActivity : Activity() {
                     collectAwb(tree, DocumentsContract.getTreeDocumentId(tree), found)
                     runOnUiThread {
                         setBusy(false, "")
-                        startConversion(found)
+                        askAndStart(found)
                     }
                 }
             }
@@ -195,11 +230,73 @@ class MainActivity : Activity() {
         return uri.lastPathSegment?.substringAfterLast('/') ?: "audio.awb"
     }
 
-    private fun startConversion(uris: List<Uri>) {
+    // ---------- место сохранения ----------
+
+    private fun loadSaveTree(): Uri? {
+        val saved = prefs.getString(PREF_SAVE_TREE, null) ?: return null
+        val uri = Uri.parse(saved)
+        // доступ мог быть отозван — тогда возвращаемся к папке по умолчанию
+        val granted = contentResolver.persistedUriPermissions.any {
+            it.uri == uri && it.isWritePermission
+        }
+        return if (granted) uri else null
+    }
+
+    /** Понятное название выбранной папки */
+    private fun saveLabel(): String {
+        val tree = saveTree ?: return "Музыка/AWB2MP3"
+        try {
+            val docUri = DocumentsContract.buildDocumentUriUsingTree(
+                tree, DocumentsContract.getTreeDocumentId(tree)
+            )
+            contentResolver.query(
+                docUri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null
+            )?.use {
+                if (it.moveToFirst()) return it.getString(0) ?: ""
+            }
+        } catch (e: Exception) {
+            // ниже вернём запасной вариант
+        }
+        return Uri.decode(tree.lastPathSegment ?: "выбранная папка")
+    }
+
+    private fun updateSaveButton() {
+        btnSave.text = "Сохранять в: ${saveLabel()}\n(нажмите, чтобы изменить)"
+    }
+
+    private fun pickSaveFolder() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+            )
+        }
+        startActivityForResult(intent, REQ_SAVE)
+    }
+
+    /** Перед стартом конвертации спрашиваем, куда сохранять */
+    private fun askAndStart(uris: List<Uri>) {
         if (uris.isEmpty()) {
+            pendingUris = emptyList()
             status.text = "Файлы AWB не найдены"
             return
         }
+        pendingUris = uris
+        AlertDialog.Builder(this)
+            .setTitle("Файлов: ${uris.size}")
+            .setMessage("Сохранить MP3 в:\n${saveLabel()}")
+            .setCancelable(false)
+            .setPositiveButton("Начать") { _, _ ->
+                pendingUris = emptyList()
+                runConversion(uris)
+            }
+            .setNeutralButton("Другая папка…") { _, _ -> pickSaveFolder() }
+            .setNegativeButton("Отмена") { _, _ -> pendingUris = emptyList() }
+            .show()
+    }
+
+    private fun runConversion(uris: List<Uri>) {
         val bitrate = bitrates[bitrateSpinner.selectedItemPosition]
         log.text = ""
         progress.progress = 0
@@ -233,7 +330,7 @@ class MainActivity : Activity() {
                                 tmp.absolutePath, bitrate
                             )
                             if (error == null) {
-                                saveToMusic(tmp, outName)
+                                saveFile(tmp, outName)
                                 ok++
                                 appendLog("✓ $outName")
                             } else {
@@ -253,8 +350,25 @@ class MainActivity : Activity() {
             }
 
             runOnUiThread {
-                setBusy(false, "Готово: сохранено $ok, ошибок $failed. Папка: Музыка/AWB2MP3")
+                setBusy(false, "Готово: сохранено $ok, ошибок $failed. Папка: ${saveLabel()}")
             }
+        }
+    }
+
+    /** Сохраняет MP3 в выбранную папку или (если не выбрана) в Музыка/AWB2MP3 */
+    private fun saveFile(file: File, displayName: String) {
+        val tree = saveTree
+        if (tree == null) {
+            saveToMusic(file, displayName)
+            return
+        }
+        val parent = DocumentsContract.buildDocumentUriUsingTree(
+            tree, DocumentsContract.getTreeDocumentId(tree)
+        )
+        val target = DocumentsContract.createDocument(contentResolver, parent, "audio/mpeg", displayName)
+            ?: throw IllegalStateException("не удалось создать файл в выбранной папке")
+        contentResolver.openOutputStream(target)!!.use { out ->
+            file.inputStream().use { it.copyTo(out) }
         }
     }
 
@@ -284,5 +398,7 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_FILES = 1
         private const val REQ_FOLDER = 2
+        private const val REQ_SAVE = 3
+        private const val PREF_SAVE_TREE = "save_tree"
     }
 }
