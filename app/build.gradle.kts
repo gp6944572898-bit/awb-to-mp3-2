@@ -35,10 +35,21 @@ android {
         jvmTarget = "17"
     }
 
-    // Debug-APK подписывается автоматически отладочным ключом — его можно сразу ставить на телефон
+    // Постоянный отладочный ключ в репозитории: все сборки подписаны одинаково,
+    // поэтому новая версия ставится поверх старой без удаления приложения
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 }
