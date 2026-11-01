@@ -139,6 +139,13 @@ class MainActivity : Activity() {
         bitrateSpinner.isEnabled = !busy
         bitrateSpinner.alpha = if (busy) 0.5f else 1f
         setActive(btnStart, canStart)
+        // во время конвертации кнопка приглушена: без цветной подсветки и заметно тусклее
+        btnStart.elevation = if (canStart) dpf(10f) else 0f
+        btnStart.alpha = when {
+            canStart -> 1f
+            busy -> 0.3f
+            else -> 0.45f
+        }
         btnStart.text = when {
             busy -> "Идёт конвертация…"
             pending > 0 -> "Начать конвертацию ($pending)"
