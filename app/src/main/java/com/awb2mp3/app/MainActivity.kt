@@ -78,7 +78,9 @@ class MainActivity : Activity() {
     private lateinit var btnStart: Button
     private lateinit var btnClear: Button
     private lateinit var bitrateSpinner: Spinner
-    private lateinit var progress: ProgressBar
+    private lateinit var progress: SmoothBar
+    private lateinit var progressEq: EqualizerView
+    private var stopMode = false
     private lateinit var status: TextView
     private lateinit var percentText: TextView
     private lateinit var list: ListView
@@ -151,13 +153,33 @@ class MainActivity : Activity() {
             pending > 0 -> "Начать конвертацию ($pending)"
             else -> "Начать конвертацию"
         }
-        setActive(btnClear, !busy && items.isNotEmpty())
+        // во время конвертации вторая кнопка превращается в «Стоп»
+        if (busy != stopMode) {
+            stopMode = busy
+            applyClearStyle(busy)
+        }
+        if (busy) {
+            val stopping = ConversionState.cancelRequested
+            btnClear.text = if (stopping) "Остановка…" else "■ Стоп"
+            setActive(btnClear, !stopping)
+        } else {
+            btnClear.text = "Очистить"
+            setActive(btnClear, items.isNotEmpty())
+        }
         updateStartPulse(canStart)
 
         status.text = ConversionState.status
         val p = ConversionState.progress
         percentText.text = if (busy || p in 1..99) "$p%" else ""
         progress.setProgress(p, true)
+        progress.shimmer = busy
+        if (busy) {
+            progressEq.visibility = View.VISIBLE
+            progressEq.start()
+        } else {
+            progressEq.stop()
+            progressEq.visibility = View.GONE
+        }
         adapter.submit(items)
     }
 
@@ -182,6 +204,37 @@ class MainActivity : Activity() {
             startPulse = null
             btnStart.translationZ = 0f
         }
+    }
+
+    /** «Очистить» вне конвертации, «Стоп» во время неё */
+    private fun onClearOrStop() {
+        if (!ConversionState.busy) {
+            ConversionState.clearAll()
+            ConversionState.progress = 0
+            ConversionState.status = "Добавьте файлы AWB"
+            ConversionState.changed()
+            return
+        }
+        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Остановить конвертацию?")
+            .setMessage("Готовые файлы останутся. Текущий файл будет прерван, его можно запустить заново.")
+            .setPositiveButton("Остановить") { _, _ -> requestStop() }
+            .setNegativeButton("Продолжить", null)
+            .show()
+    }
+
+    private fun requestStop() {
+        if (!ConversionState.busy || ConversionState.cancelRequested) return
+        ConversionState.cancelRequested = true
+        converter.setCancel(true) // прерывает и нативное декодирование
+        ConversionState.status = "Останавливаю…"
+        ConversionState.changed()
+    }
+
+    private fun applyClearStyle(stop: Boolean) {
+        val face = if (stop) shape(withAlpha(C_RED, 0x33), 16f, withAlpha(C_RED, 0xB0), 1f)
+        else shape(C_GLASS, 16f, C_GLASS_STROKE, 1f)
+        btnClear.background = ripple(face, 16f)
     }
 
     // ---------- вспомогательные функции оформления ----------
@@ -249,18 +302,9 @@ class MainActivity : Activity() {
         pressEffect()
     }
 
-    private fun styledProgress(heightDp: Int): ProgressBar =
-        ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 100
-            val track = shape(Color.parseColor("#26FFFFFF"), heightDp / 2f)
-            val fill = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(C_BLUE, C_CYAN, C_GREEN))
-                .apply { cornerRadius = dpf(heightDp / 2f) }
-            progressDrawable = LayerDrawable(arrayOf<Drawable>(track, ClipDrawable(fill, Gravity.START, ClipDrawable.HORIZONTAL)))
-                .apply {
-                    setId(0, android.R.id.background)
-                    setId(1, android.R.id.progress)
-                }
-        }
+    /** Полоса прогресса с плавным ростом и бегущим бликом ([shimmer]) */
+    private fun styledProgress(shimmer: Boolean = false): SmoothBar =
+        SmoothBar(this).apply { this.shimmer = shimmer }
 
     private inner class DarkSpinnerAdapter(items: List<String>) :
         ArrayAdapter<String>(this@MainActivity, android.R.layout.simple_spinner_item, items) {
@@ -394,15 +438,11 @@ class MainActivity : Activity() {
             setOnClickListener { onStartClicked() }
         }
         btnClear = styledButton("Очистить", false).apply {
-            setOnClickListener {
-                ConversionState.clearAll()
-                ConversionState.progress = 0
-                ConversionState.status = "Добавьте файлы AWB"
-                ConversionState.changed()
-            }
+            textSize = 14f
+            setOnClickListener { onClearOrStop() }
         }
-        startRow.addView(btnStart, lp(0, WRAP, end = 6, weight = 2f))
-        startRow.addView(btnClear, lp(0, WRAP, start = 6, weight = 1f))
+        startRow.addView(btnStart, lp(0, WRAP, end = 6, weight = 3f))
+        startRow.addView(btnClear, lp(0, WRAP, start = 6, weight = 2f))
         root.addView(startRow, lp(MATCH, WRAP, top = 12))
 
         // --- карточка общего прогресса ---
@@ -424,10 +464,12 @@ class MainActivity : Activity() {
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             setTextColor(C_CYAN)
         }
+        progressEq = EqualizerView(this).apply { visibility = View.GONE }
         statusRow.addView(status, lp(0, WRAP, end = 8, weight = 1f))
+        statusRow.addView(progressEq, lp(dp(22), dp(20), end = 10))
         statusRow.addView(percentText, lp(WRAP, WRAP))
         progressCard.addView(statusRow, lp(MATCH, WRAP))
-        progress = styledProgress(8)
+        progress = styledProgress()
         progressCard.addView(progress, lp(MATCH, dp(8), top = 10))
         root.addView(progressCard, lp(MATCH, WRAP, top = 12))
 
@@ -467,7 +509,9 @@ class MainActivity : Activity() {
         lateinit var icon: TextView
         lateinit var iconBg: GradientDrawable
         lateinit var name: TextView
-        lateinit var bar: ProgressBar
+        lateinit var bar: SmoothBar
+        lateinit var iconBox: FrameLayout
+        lateinit var eq: EqualizerView
         lateinit var message: TextView
         lateinit var close: TextView
 
@@ -498,7 +542,12 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER
                 background = iconBg
             }
-            card.addView(icon, lp(dp(38), dp(38), end = 12))
+            iconBox = FrameLayout(this@MainActivity)
+            iconBox.addView(icon, FrameLayout.LayoutParams(MATCH, MATCH))
+            // эквалайзер вместо значка ▶ у файла, который сейчас конвертируется
+            eq = EqualizerView(this@MainActivity).apply { visibility = View.GONE }
+            iconBox.addView(eq, FrameLayout.LayoutParams(dp(20), dp(18), Gravity.CENTER))
+            card.addView(iconBox, lp(dp(38), dp(38), end = 12))
 
             val middle = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
             name = TextView(this@MainActivity).apply {
@@ -507,7 +556,7 @@ class MainActivity : Activity() {
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.MIDDLE
             }
-            bar = styledProgress(6)
+            bar = styledProgress(true)
             message = TextView(this@MainActivity).apply { textSize = 12f }
             middle.addView(name, lp(MATCH, WRAP))
             middle.addView(bar, lp(MATCH, dp(6), top = 6))
@@ -545,6 +594,10 @@ class MainActivity : Activity() {
             icon.animate().cancel()
             icon.scaleX = 1f
             icon.scaleY = 1f
+            iconBox.scaleX = 1f
+            iconBox.scaleY = 1f
+            eq.stop()
+            eq.visibility = View.GONE
         }
 
         fun bind(data: QueueItem) {
@@ -575,7 +628,7 @@ class MainActivity : Activity() {
                 ItemState.SKIPPED -> "↷" to C_TEXT2
                 ItemState.FAILED -> "!" to C_RED
             }
-            icon.text = glyph
+            icon.text = if (running) "" else glyph
             icon.setTextColor(color)
             iconBg.setColor(withAlpha(color, 0x38))
 
@@ -591,12 +644,15 @@ class MainActivity : Activity() {
                     addUpdateListener { cardBg.setStroke(dp(2), withAlpha(C_CYAN, it.animatedValue as Int)) }
                     start()
                 }
+                eq.visibility = View.VISIBLE
+                eq.start()
+                // едва заметное «дыхание» кружка
                 pulse = ObjectAnimator.ofPropertyValuesHolder(
-                    icon,
-                    PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.2f),
-                    PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.2f)
+                    iconBox,
+                    PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.07f),
+                    PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.07f)
                 ).apply {
-                    duration = 700
+                    duration = 1100
                     repeatMode = ValueAnimator.REVERSE
                     repeatCount = ValueAnimator.INFINITE
                     start()
@@ -958,6 +1014,8 @@ class MainActivity : Activity() {
 
     private fun runQueue() {
         val bitrate = bitrates[bitrateSpinner.selectedItemPosition]
+        ConversionState.cancelRequested = false
+        converter.setCancel(false)
         ConversionState.resetFailed()
         ConversionState.beginRun()
         ConversionState.progress = 0
@@ -970,10 +1028,15 @@ class MainActivity : Activity() {
             var ok = 0
             var skipped = 0
             var failed = 0
+            var cancelled = false
             try {
                 val existing = existingNames()
 
                 while (true) {
+                    if (ConversionState.cancelRequested) {
+                        cancelled = true
+                        break
+                    }
                     val item = ConversionState.takeNext() ?: break // берёт файлы по порядку списка
                     val name = item.name
                     val base = name.substringBeforeLast('.')
@@ -1003,6 +1066,14 @@ class MainActivity : Activity() {
                             skipped += result.skipped
                             failed += result.failed
                         }
+                    } catch (e: ConversionCancelled) {
+                        // остановлено пользователем: файл возвращается в очередь, готовые остаются
+                        item.state = ItemState.PENDING
+                        item.percent = 0
+                        item.message = "остановлено"
+                        cancelled = true
+                        ConversionState.changed()
+                        break
                     } catch (e: Exception) {
                         item.state = ItemState.FAILED
                         item.message = e.message ?: "ошибка"
@@ -1017,8 +1088,10 @@ class MainActivity : Activity() {
                 val summary = "Сохранено: $ok, пропущено: $skipped, ошибок: $failed. Папка: ${saveLabel()}"
                 KeepAliveService.stop(this)
                 KeepAliveService.showDone(this, summary)
-                ConversionState.progress = 100
-                setBusy(false, "Готово. $summary")
+                ConversionState.cancelRequested = false
+                converter.setCancel(false)
+                ConversionState.progress = if (cancelled) ConversionState.overallPercent() else 100
+                setBusy(false, (if (cancelled) "Остановлено. " else "Готово. ") + summary)
             }
         }
     }
@@ -1047,6 +1120,7 @@ class MainActivity : Activity() {
             }
 
             for (s in 1..count) {
+                if (ConversionState.cancelRequested) throw ConversionCancelled()
                 item.percent = ((s - 1) * 100) / count
                 item.message = "трек $s из $count"
                 ConversionState.changed()
@@ -1061,6 +1135,7 @@ class MainActivity : Activity() {
                     val error = converter.convert(
                         input.absolutePath, if (count == 1) 0 else s, tmp.absolutePath, bitrate
                     )
+                    if (error == NativeConverter.CANCELLED) throw ConversionCancelled()
                     if (error == null) {
                         totalSize += saveFile(tmp, outName)
                         existing.add(outName)
@@ -1128,7 +1203,7 @@ class MainActivity : Activity() {
                             throw IllegalStateException("ошибка кодирования или записи (нет места?)")
                         }
                     }
-                }, onProgress)
+                }, onProgress, { ConversionState.cancelRequested })
             }
             if (handle == 0L) throw IllegalStateException("в файле нет звука")
             val h = handle

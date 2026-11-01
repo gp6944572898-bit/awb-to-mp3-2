@@ -24,6 +24,9 @@ object ConversionState {
     @Volatile var status: String = "Добавьте файлы AWB"
     @Volatile var progress: Int = 0
 
+    /** Пользователь нажал «Стоп» (кнопка или уведомление) */
+    @Volatile var cancelRequested: Boolean = false
+
     /** Момент старта текущего запуска (мс) */
     @Volatile var startedAt: Long = 0L
 

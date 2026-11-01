@@ -63,3 +63,9 @@ Java_com_awb2mp3_app_NativeConverter_encoderClose(JNIEnv* env, jobject thiz, jlo
     return awb_enc_close((awb_enc_t*)(intptr_t)handle);
 }
 
+
+/* Остановка конвертации из другого потока */
+JNIEXPORT void JNICALL
+Java_com_awb2mp3_app_NativeConverter_setCancel(JNIEnv* env, jobject thiz, jboolean v) {
+    awb_set_cancel(v ? 1 : 0);
+}

@@ -17,7 +17,13 @@ class NativeConverter {
     /** Диагностика файла, который не открылся: заголовок и сообщения декодера */
     external fun diagnose(path: String): String
 
+    /** Просит нативную часть прервать текущую конвертацию (true) или сбрасывает запрос (false) */
+    external fun setCancel(flag: Boolean)
+
     companion object {
+        /** Текст ошибки, которым нативная часть сообщает об остановке */
+        const val CANCELLED = "__cancelled__"
+
         init {
             System.loadLibrary("awbconv")
         }

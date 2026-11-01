@@ -22,6 +22,13 @@ static void log_start(void) {
     libvgmstream_set_log(LIBVGMSTREAM_LOG_LEVEL_ALL, log_cb);
 }
 
+/* Флаг отмены: выставляется из другого потока, проверяется в цикле декодирования */
+static volatile int g_cancel = 0;
+
+void awb_set_cancel(int v) {
+    g_cancel = v;
+}
+
 static void set_err(char* err, int err_len, const char* msg) {
     if (err && err_len > 0)
         snprintf(err, (size_t)err_len, "%s", msg);
@@ -104,6 +111,10 @@ int awb_convert(const char* path, int subsong, const char* out_path, int bitrate
     }
 
     for (;;) {
+        if (g_cancel) {
+            set_err(err, err_len, "__cancelled__");
+            goto done;
+        }
         int r = libvgmstream_render(lib);
         if (r < 0) {
             set_err(err, err_len, "Ошибка декодирования");

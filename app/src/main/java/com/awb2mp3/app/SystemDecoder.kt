@@ -7,6 +7,9 @@ import android.media.MediaFormat
 import android.net.Uri
 import java.io.FileDescriptor
 
+/** Бросается, когда пользователь остановил конвертацию */
+class ConversionCancelled : Exception("остановлено")
+
 /** Приёмник декодированного звука (PCM 16 бит) */
 interface PcmSink {
     /** Вызывается один раз перед первой порцией данных; [durationUs] — длительность (0, если неизвестна) */
@@ -42,7 +45,9 @@ object SystemDecoder {
      * Декодирует файл из [fd] и отдаёт PCM в [sink].
      * [onProgress] получает (сколько микросекунд звука обработано, общая длительность или 0) примерно 2 раза в секунду.
      */
-    fun decode(fd: FileDescriptor, sink: PcmSink, onProgress: (Long, Long) -> Unit) {
+    fun decode(
+        fd: FileDescriptor, sink: PcmSink, onProgress: (Long, Long) -> Unit, isCancelled: () -> Boolean = { false }
+    ) {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -82,6 +87,7 @@ object SystemDecoder {
             var idleAfterInput = 0 // сколько раз подряд декодер ничего не вернул после конца входа
 
             while (!outputDone) {
+                if (isCancelled()) throw ConversionCancelled()
                 if (!inputDone) {
                     val inIndex = decoder.dequeueInputBuffer(10_000)
                     if (inIndex >= 0) {

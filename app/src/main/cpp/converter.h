@@ -21,4 +21,7 @@ awb_enc_t* awb_enc_open(const char* out_path, int sample_rate, int channels, int
 int awb_enc_write(awb_enc_t* enc, const unsigned char* data, int bytes); /* 0 — ок, < 0 — ошибка */
 int awb_enc_close(awb_enc_t* enc);                                       /* дописывает хвост и закрывает */
 
+/* Запрос остановки текущей конвертации (1) или сброс запроса (0) */
+void awb_set_cancel(int v);
+
 #endif

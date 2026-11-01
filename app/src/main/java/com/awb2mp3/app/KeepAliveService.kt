@@ -23,6 +23,14 @@ class KeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            // нажали «Остановить» в уведомлении
+            ConversionState.cancelRequested = true
+            ConversionState.status = "Останавливаю…"
+            NativeConverter().setCancel(true)
+            ConversionState.changed()
+            return START_NOT_STICKY
+        }
         ensureChannels(this)
         val notification = buildProgress(this, "Подготовка…", 0, indeterminate = true)
         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
@@ -45,6 +53,7 @@ class KeepAliveService : Service() {
 
     companion object {
         const val NOTIFICATION_ID = 1
+        const val ACTION_STOP = "com.awb2mp3.app.STOP"
         const val DONE_NOTIFICATION_ID = 2
         private const val CHANNEL_PROGRESS = "progress"
         private const val CHANNEL_DONE = "done"
@@ -82,7 +91,18 @@ class KeepAliveService : Service() {
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setContentIntent(openAppIntent(context))
+                .addAction(
+                    Notification.Action.Builder(
+                        android.R.drawable.ic_menu_close_clear_cancel, "Остановить", stopIntent(context)
+                    ).build()
+                )
                 .build()
+
+        private fun stopIntent(context: Context): PendingIntent =
+            PendingIntent.getService(
+                context, 1, Intent(context, KeepAliveService::class.java).setAction(ACTION_STOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
 
         /** Обновляет текст и прогресс в уведомлении службы */
         fun update(context: Context, text: String, percent: Int) {
