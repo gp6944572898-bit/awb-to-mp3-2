@@ -646,17 +646,6 @@ class MainActivity : Activity() {
                 }
                 eq.visibility = View.VISIBLE
                 eq.start()
-                // едва заметное «дыхание» кружка
-                pulse = ObjectAnimator.ofPropertyValuesHolder(
-                    iconBox,
-                    PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.07f),
-                    PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.07f)
-                ).apply {
-                    duration = 1100
-                    repeatMode = ValueAnimator.REVERSE
-                    repeatCount = ValueAnimator.INFINITE
-                    start()
-                }
             } else {
                 card.elevation = dpf(2f)
                 card.outlineSpotShadowColor = Color.BLACK
