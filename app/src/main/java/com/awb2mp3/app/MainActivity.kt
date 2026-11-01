@@ -1,13 +1,26 @@
 package com.awb2mp3.app
 
 import android.Manifest
+import android.animation.ObjectAnimator
+import android.animation.PropertyValuesHolder
+import android.animation.ValueAnimator
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.graphics.drawable.ClipDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -16,12 +29,15 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.ArrayAdapter
 import android.widget.BaseAdapter
 import android.widget.Button
-import android.widget.ImageButton
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ProgressBar
@@ -31,12 +47,32 @@ import android.widget.Toast
 import java.io.File
 import java.util.concurrent.Executors
 
+// ---------- палитра в цветах иконки ----------
+private val C_BG1 = Color.parseColor("#041448")
+private val C_BG2 = Color.parseColor("#05366E")
+private val C_BG3 = Color.parseColor("#037E78")
+private val C_BLUE = Color.parseColor("#2F6BFF")
+private val C_CYAN = Color.parseColor("#22E5F0")
+private val C_GREEN = Color.parseColor("#3DEB9A")
+private val C_RED = Color.parseColor("#FF7A7A")
+private val C_TEXT2 = Color.parseColor("#B9C8E4")
+private val C_GLASS = Color.parseColor("#1FFFFFFF")
+private val C_GLASS_STROKE = Color.parseColor("#33FFFFFF")
+private val C_POPUP = Color.parseColor("#0B2A63")
+
+private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+
+/** Цвет с заданной прозрачностью (alpha 0..255) */
+private fun withAlpha(color: Int, alpha: Int): Int = (color and 0x00FFFFFF) or (alpha shl 24)
+
 class MainActivity : Activity() {
 
     private val converter by lazy { NativeConverter() }
     private val worker = Executors.newSingleThreadExecutor()
 
-    private lateinit var btnSave: Button
+    private lateinit var saveRow: LinearLayout
+    private lateinit var saveValue: TextView
     private lateinit var btnFiles: Button
     private lateinit var btnFolder: Button
     private lateinit var btnStart: Button
@@ -44,8 +80,12 @@ class MainActivity : Activity() {
     private lateinit var bitrateSpinner: Spinner
     private lateinit var progress: ProgressBar
     private lateinit var status: TextView
+    private lateinit var percentText: TextView
     private lateinit var list: ListView
     private val adapter = QueueAdapter()
+
+    /** Пульсация свечения кнопки «Начать», пока её можно нажать */
+    private var startPulse: ObjectAnimator? = null
 
     /** Варианты битрейта; 0 = «Авто»: для речи (AMR) как у исходного файла, для музыки 192 */
     private val bitrates = listOf(0, 16, 24, 32, 48, 64, 96, 128, 192, 256, 320)
@@ -60,6 +100,13 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // фон окна — диагональный градиент из цветов иконки
+        window.setBackgroundDrawable(
+            GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(C_BG1, C_BG2, C_BG3))
+        )
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+
         saveTree = loadSaveTree()
         buildUi()
         updateSaveButton()
@@ -75,6 +122,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         ConversionState.listener = null
+        updateStartPulse(false)
         super.onPause()
     }
 
@@ -83,78 +131,262 @@ class MainActivity : Activity() {
         val busy = ConversionState.busy
         val items = ConversionState.snapshot()
         val pending = items.count { it.state == ItemState.PENDING || it.state == ItemState.FAILED }
+        val canStart = !busy && pending > 0
 
-        btnFiles.isEnabled = !busy
-        btnFolder.isEnabled = !busy
-        btnSave.isEnabled = !busy
+        setActive(btnFiles, !busy)
+        setActive(btnFolder, !busy)
+        setActive(saveRow, !busy)
         bitrateSpinner.isEnabled = !busy
-        btnStart.isEnabled = !busy && pending > 0
-        btnStart.text = if (pending > 0) "Начать конвертацию ($pending)" else "Начать конвертацию"
-        btnClear.isEnabled = !busy && items.isNotEmpty()
+        bitrateSpinner.alpha = if (busy) 0.5f else 1f
+        setActive(btnStart, canStart)
+        btnStart.text = when {
+            busy -> "Идёт конвертация…"
+            pending > 0 -> "Начать конвертацию ($pending)"
+            else -> "Начать конвертацию"
+        }
+        setActive(btnClear, !busy && items.isNotEmpty())
+        updateStartPulse(canStart)
 
         status.text = ConversionState.status
-        progress.progress = ConversionState.progress
+        val p = ConversionState.progress
+        percentText.text = if (busy || p in 1..99) "$p%" else ""
+        progress.setProgress(p, true)
         adapter.submit(items)
     }
 
+    private fun setActive(v: View, active: Boolean) {
+        v.isEnabled = active
+        v.alpha = if (active) 1f else 0.45f
+    }
+
+    /** Мягкая пульсация тени-подсветки у главной кнопки */
+    private fun updateStartPulse(active: Boolean) {
+        if (active) {
+            if (startPulse == null) {
+                startPulse = ObjectAnimator.ofFloat(btnStart, View.TRANSLATION_Z, 0f, dpf(8f)).apply {
+                    duration = 1100
+                    repeatMode = ValueAnimator.REVERSE
+                    repeatCount = ValueAnimator.INFINITE
+                    start()
+                }
+            }
+        } else {
+            startPulse?.cancel()
+            startPulse = null
+            btnStart.translationZ = 0f
+        }
+    }
+
+    // ---------- вспомогательные функции оформления ----------
+
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun dpf(v: Float) = v * resources.displayMetrics.density
+
+    private fun lp(
+        w: Int, h: Int, top: Int = 0, bottom: Int = 0, start: Int = 0, end: Int = 0, weight: Float = 0f
+    ): LinearLayout.LayoutParams = LinearLayout.LayoutParams(w, h, weight).apply {
+        setMargins(dp(start), dp(top), dp(end), dp(bottom))
+    }
+
+    private fun shape(color: Int, radiusDp: Float, strokeColor: Int = 0, strokeDp: Float = 0f) =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dpf(radiusDp)
+            if (strokeDp > 0f) setStroke(dp(strokeDp.toInt().coerceAtLeast(1)), strokeColor)
+        }
+
+    /** Волна-подсветка при нажатии поверх любого фона */
+    private fun ripple(content: Drawable?, radiusDp: Float, oval: Boolean = false): RippleDrawable {
+        val mask = GradientDrawable().apply {
+            setColor(Color.WHITE)
+            if (oval) this.shape = GradientDrawable.OVAL else cornerRadius = dpf(radiusDp)
+        }
+        return RippleDrawable(ColorStateList.valueOf(Color.parseColor("#44FFFFFF")), content, mask)
+    }
+
+    /** Лёгкое «вдавливание» при нажатии */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun View.pressEffect() {
+        setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> v.animate().scaleX(0.97f).scaleY(0.97f).setDuration(90).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(150).start()
+            }
+            false
+        }
+    }
+
+    private fun styledButton(label: String, primary: Boolean): Button = Button(this).apply {
+        text = label
+        isAllCaps = false
+        setTextColor(Color.WHITE)
+        textSize = 15f
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        stateListAnimator = null
+        minHeight = 0
+        minimumHeight = 0
+        setPadding(dp(14), dp(13), dp(14), dp(13))
+        val face: Drawable = if (primary) {
+            GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(C_BLUE, C_CYAN, C_GREEN))
+                .apply { cornerRadius = dpf(16f) }
+        } else {
+            shape(C_GLASS, 16f, C_GLASS_STROKE, 1f)
+        }
+        background = ripple(face, 16f)
+        if (primary) {
+            elevation = dpf(10f)
+            outlineSpotShadowColor = C_CYAN // цветная подсветка вокруг кнопки
+            outlineAmbientShadowColor = C_CYAN
+        }
+        pressEffect()
+    }
+
+    private fun styledProgress(heightDp: Int): ProgressBar =
+        ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            val track = shape(Color.parseColor("#26FFFFFF"), heightDp / 2f)
+            val fill = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(C_BLUE, C_CYAN, C_GREEN))
+                .apply { cornerRadius = dpf(heightDp / 2f) }
+            progressDrawable = LayerDrawable(arrayOf<Drawable>(track, ClipDrawable(fill, Gravity.START, ClipDrawable.HORIZONTAL)))
+                .apply {
+                    setId(0, android.R.id.background)
+                    setId(1, android.R.id.progress)
+                }
+        }
+
+    private inner class DarkSpinnerAdapter(items: List<String>) :
+        ArrayAdapter<String>(this@MainActivity, android.R.layout.simple_spinner_item, items) {
+        init {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+            (super.getView(position, convertView, parent) as TextView).apply {
+                setTextColor(Color.WHITE)
+                textSize = 15f
+            }
+
+        override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
+            (super.getDropDownView(position, convertView, parent) as TextView).apply {
+                setTextColor(Color.WHITE)
+                textSize = 15f
+                setBackgroundColor(Color.TRANSPARENT)
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+            }
+    }
 
     private fun buildUi() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(24), dp(12), dp(8))
+            setPadding(dp(14), dp(10), dp(14), dp(8))
+        }
+        // отступы под системные панели (при сквозном режиме экрана)
+        @Suppress("DEPRECATION")
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            v.setPadding(
+                dp(14) + insets.systemWindowInsetLeft,
+                dp(10) + insets.systemWindowInsetTop,
+                dp(14) + insets.systemWindowInsetRight,
+                dp(8) + insets.systemWindowInsetBottom
+            )
+            insets
         }
 
-        root.addView(TextView(this).apply {
+        // --- заголовок с градиентом ---
+        val title = TextView(this).apply {
             text = "AWB → MP3"
-            textSize = 22f
-            setPadding(dp(4), 0, 0, dp(4))
-        })
-
-        btnSave = Button(this).apply {
-            isAllCaps = false
-            setOnClickListener { pickSaveFolder() }
+            textSize = 28f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setTextColor(Color.WHITE)
         }
-        root.addView(btnSave)
+        title.post {
+            title.paint.shader = LinearGradient(
+                0f, 0f, title.paint.measureText(title.text.toString()), 0f,
+                intArrayOf(Color.WHITE, C_CYAN, C_GREEN), null, Shader.TileMode.CLAMP
+            )
+            title.invalidate()
+        }
+        root.addView(title, lp(WRAP, WRAP))
+        root.addView(TextView(this).apply {
+            text = "Конвертер аудиокниг"
+            textSize = 13f
+            setTextColor(C_TEXT2)
+        }, lp(WRAP, WRAP, bottom = 10))
+
+        // --- карточка настроек ---
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = shape(C_GLASS, 22f, C_GLASS_STROKE, 1f)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+        }
+
+        saveRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = ripple(shape(C_GLASS, 16f, C_GLASS_STROKE, 1f), 16f)
+            isClickable = true
+            setOnClickListener { pickSaveFolder() }
+            pressEffect()
+        }
+        saveRow.addView(TextView(this).apply {
+            text = "📁"
+            textSize = 22f
+        }, lp(WRAP, WRAP, end = 10))
+        val saveText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        saveText.addView(TextView(this).apply {
+            text = "Сохранять в"
+            textSize = 12f
+            setTextColor(C_TEXT2)
+        })
+        saveValue = TextView(this).apply {
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.MIDDLE
+        }
+        saveText.addView(saveValue)
+        saveRow.addView(saveText, lp(0, WRAP, weight = 1f))
+        saveRow.addView(TextView(this).apply {
+            text = "›"
+            textSize = 26f
+            setTextColor(C_TEXT2)
+        })
+        controls.addView(saveRow, lp(MATCH, WRAP))
 
         val addRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        btnFiles = Button(this).apply {
-            text = "+ Файлы"
-            setOnClickListener { pickFiles() }
-        }
-        btnFolder = Button(this).apply {
-            text = "+ Папка"
-            setOnClickListener { pickFolder() }
-        }
-        val half = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        addRow.addView(btnFiles, half)
-        addRow.addView(btnFolder, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(addRow)
+        btnFiles = styledButton("＋ Файлы", false).apply { setOnClickListener { pickFiles() } }
+        btnFolder = styledButton("＋ Папка", false).apply { setOnClickListener { pickFolder() } }
+        addRow.addView(btnFiles, lp(0, WRAP, end = 4, weight = 1f))
+        addRow.addView(btnFolder, lp(0, WRAP, start = 4, weight = 1f))
+        controls.addView(addRow, lp(MATCH, WRAP, top = 8))
 
         val bitrateRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), dp(2), 0, dp(2))
         }
-        bitrateRow.addView(TextView(this).apply { text = "Битрейт, кбит/с:  " })
+        bitrateRow.addView(TextView(this).apply {
+            text = "Битрейт, кбит/с"
+            textSize = 14f
+            setTextColor(C_TEXT2)
+        }, lp(WRAP, WRAP, end = 8))
         bitrateSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                bitrates.map { if (it == 0) "Авто (как у исходника)" else it.toString() }
-            )
+            adapter = DarkSpinnerAdapter(bitrates.map { if (it == 0) "Авто (как у исходника)" else it.toString() })
             setSelection(0)
+            setPopupBackgroundDrawable(shape(C_POPUP, 14f, C_GLASS_STROKE, 1f))
         }
-        bitrateRow.addView(bitrateSpinner)
-        root.addView(bitrateRow)
+        bitrateRow.addView(bitrateSpinner, lp(0, WRAP, weight = 1f))
+        controls.addView(bitrateRow, lp(MATCH, WRAP, top = 4))
+        root.addView(controls, lp(MATCH, WRAP))
 
+        // --- кнопки запуска ---
         val startRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        btnStart = Button(this).apply {
-            text = "Начать конвертацию"
+        btnStart = styledButton("Начать конвертацию", true).apply {
+            textSize = 16f
             setOnClickListener { onStartClicked() }
         }
-        btnClear = Button(this).apply {
-            text = "Очистить"
+        btnClear = styledButton("Очистить", false).apply {
             setOnClickListener {
                 ConversionState.clearAll()
                 ConversionState.progress = 0
@@ -162,116 +394,231 @@ class MainActivity : Activity() {
                 ConversionState.changed()
             }
         }
-        startRow.addView(btnStart, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f))
-        startRow.addView(btnClear, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(startRow)
+        startRow.addView(btnStart, lp(0, WRAP, end = 6, weight = 2f))
+        startRow.addView(btnClear, lp(0, WRAP, start = 6, weight = 1f))
+        root.addView(startRow, lp(MATCH, WRAP, top = 12))
 
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
-        root.addView(progress)
-
+        // --- карточка общего прогресса ---
+        val progressCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = shape(C_GLASS, 20f, C_GLASS_STROKE, 1f)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         status = TextView(this).apply {
             textSize = 13f
-            setPadding(dp(4), dp(4), dp(4), dp(4))
+            setTextColor(Color.WHITE)
         }
-        root.addView(status)
+        percentText = TextView(this).apply {
+            textSize = 22f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setTextColor(C_CYAN)
+        }
+        statusRow.addView(status, lp(0, WRAP, end = 8, weight = 1f))
+        statusRow.addView(percentText, lp(WRAP, WRAP))
+        progressCard.addView(statusRow, lp(MATCH, WRAP))
+        progress = styledProgress(8)
+        progressCard.addView(progress, lp(MATCH, dp(8), top = 10))
+        root.addView(progressCard, lp(MATCH, WRAP, top = 12))
 
+        // --- список файлов ---
+        val frame = FrameLayout(this).apply { clipChildren = false }
         list = ListView(this).apply {
             adapter = this@MainActivity.adapter
             divider = null
-            isVerticalScrollBarEnabled = true
+            dividerHeight = 0
+            clipToPadding = false
+            clipChildren = false
+            setPadding(0, dp(4), 0, dp(8))
+            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            isVerticalScrollBarEnabled = false
         }
-        root.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val empty = TextView(this).apply {
+            text = "Список пуст\nДобавьте файлы или папку с AWB"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(C_TEXT2)
+        }
+        frame.addView(list, FrameLayout.LayoutParams(MATCH, MATCH))
+        frame.addView(empty, FrameLayout.LayoutParams(MATCH, MATCH))
+        list.emptyView = empty
+        root.addView(frame, lp(MATCH, 0, top = 8, weight = 1f))
 
         setContentView(root)
+        root.requestApplyInsets()
     }
 
     // ---------- список файлов ----------
 
     private inner class RowHolder {
+        lateinit var wrapper: FrameLayout
+        lateinit var card: LinearLayout
+        lateinit var cardBg: GradientDrawable
         lateinit var icon: TextView
+        lateinit var iconBg: GradientDrawable
         lateinit var name: TextView
         lateinit var bar: ProgressBar
         lateinit var message: TextView
-        lateinit var close: ImageButton
+        lateinit var close: TextView
+
         var item: QueueItem? = null
+        private var lastState: ItemState? = null
+        private var pulse: ObjectAnimator? = null
+        private var glow: ValueAnimator? = null
 
         fun build(): View {
-            val row = LinearLayout(this@MainActivity).apply {
+            wrapper = FrameLayout(this@MainActivity).apply {
+                setPadding(dp(1), dp(4), dp(1), dp(4))
+                clipChildren = false
+                clipToPadding = false
+            }
+            cardBg = shape(C_GLASS, 18f, C_GLASS_STROKE, 1f)
+            card = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(4), dp(6), dp(4), dp(6))
+                setPadding(dp(10), dp(10), dp(4), dp(10))
+                background = cardBg
+                elevation = dpf(2f)
             }
+
+            iconBg = GradientDrawable().apply { shape = GradientDrawable.OVAL }
             icon = TextView(this@MainActivity).apply {
-                textSize = 20f
+                textSize = 17f
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
                 gravity = Gravity.CENTER
+                background = iconBg
             }
-            row.addView(icon, LinearLayout.LayoutParams(dp(32), ViewGroup.LayoutParams.WRAP_CONTENT))
+            card.addView(icon, lp(dp(38), dp(38), end = 12))
 
             val middle = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
             name = TextView(this@MainActivity).apply {
                 textSize = 15f
+                setTextColor(Color.WHITE)
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.MIDDLE
             }
-            bar = ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
-                max = 100
-            }
-            message = TextView(this@MainActivity).apply {
-                textSize = 12f
-                setTextColor(Color.GRAY)
-            }
-            middle.addView(name)
-            middle.addView(bar)
-            middle.addView(message)
-            row.addView(middle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            bar = styledProgress(6)
+            message = TextView(this@MainActivity).apply { textSize = 12f }
+            middle.addView(name, lp(MATCH, WRAP))
+            middle.addView(bar, lp(MATCH, dp(6), top = 6))
+            middle.addView(message, lp(MATCH, WRAP, top = 4))
+            card.addView(middle, lp(0, WRAP, weight = 1f))
 
-            close = ImageButton(this@MainActivity).apply {
-                setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-                setBackgroundColor(Color.TRANSPARENT)
+            close = TextView(this@MainActivity).apply {
+                text = "✕"
+                textSize = 16f
+                gravity = Gravity.CENTER
+                setTextColor(C_TEXT2)
+                background = ripple(null, 20f, oval = true)
+                isClickable = true
                 contentDescription = "Убрать из списка"
                 setOnClickListener {
-                    item?.let {
-                        if (ConversionState.remove(it)) ConversionState.changed()
-                    }
+                    val queueItem = item ?: return@setOnClickListener
+                    if (queueItem.state == ItemState.RUNNING) return@setOnClickListener
+                    // уезжает вправо и растворяется, затем удаляется из списка
+                    wrapper.animate().alpha(0f).translationX(dpf(60f)).setDuration(180).withEndAction {
+                        if (ConversionState.remove(queueItem)) ConversionState.changed()
+                    }.start()
                 }
             }
-            row.addView(close, LinearLayout.LayoutParams(dp(44), dp(44)))
-            return row
+            card.addView(close, lp(dp(42), dp(42)))
+
+            wrapper.addView(card, FrameLayout.LayoutParams(MATCH, WRAP))
+            return wrapper
         }
 
-        fun bind(it: QueueItem) {
-            item = it
-            name.text = it.name
-            when (it.state) {
-                ItemState.PENDING -> {
-                    icon.text = "○"; icon.setTextColor(Color.GRAY)
-                }
-                ItemState.RUNNING -> {
-                    icon.text = "▶"; icon.setTextColor(Color.parseColor("#1565C0"))
-                }
-                ItemState.DONE -> {
-                    icon.text = "✓"; icon.setTextColor(Color.parseColor("#2E7D32"))
-                }
-                ItemState.SKIPPED -> {
-                    icon.text = "↷"; icon.setTextColor(Color.GRAY)
-                }
-                ItemState.FAILED -> {
-                    icon.text = "✗"; icon.setTextColor(Color.parseColor("#C62828"))
-                }
-            }
-            val running = it.state == ItemState.RUNNING
+        private fun stopAnimations() {
+            pulse?.cancel()
+            pulse = null
+            glow?.cancel()
+            glow = null
+            icon.animate().cancel()
+            icon.scaleX = 1f
+            icon.scaleY = 1f
+        }
+
+        fun bind(data: QueueItem) {
+            val changedItem = item !== data
+            val wasState = lastState
+            val stateChanged = changedItem || wasState != data.state
+            item = data
+            lastState = data.state
+
+            // динамические части обновляем всегда
+            name.text = data.name
+            val running = data.state == ItemState.RUNNING
             bar.visibility = if (running) View.VISIBLE else View.GONE
-            bar.progress = it.percent
-            val msg = if (running && it.percent > 0) "${it.percent}%  ${it.message}".trim() else it.message
+            bar.setProgress(data.percent, !changedItem)
+            val msg = if (running && data.percent > 0) "${data.percent}%  ${data.message}".trim() else data.message
             message.text = msg
             message.visibility = if (msg.isEmpty()) View.GONE else View.VISIBLE
-            // удалять можно всё, кроме файла, который конвертируется прямо сейчас
+            message.setTextColor(if (data.state == ItemState.FAILED) C_RED else C_TEXT2)
             close.visibility = if (running) View.INVISIBLE else View.VISIBLE
+
+            if (!stateChanged) return // иначе анимации «дёргались» бы при каждом обновлении
+            stopAnimations()
+
+            val (glyph, color) = when (data.state) {
+                ItemState.PENDING -> "○" to C_TEXT2
+                ItemState.RUNNING -> "▶" to C_CYAN
+                ItemState.DONE -> "✓" to C_GREEN
+                ItemState.SKIPPED -> "↷" to C_TEXT2
+                ItemState.FAILED -> "!" to C_RED
+            }
+            icon.text = glyph
+            icon.setTextColor(color)
+            iconBg.setColor(withAlpha(color, 0x38))
+
+            if (running) {
+                // подсветка бегущего файла: цветная тень, мерцающая рамка и пульсирующая иконка
+                card.elevation = dpf(10f)
+                card.outlineSpotShadowColor = C_CYAN
+                card.outlineAmbientShadowColor = C_CYAN
+                glow = ValueAnimator.ofInt(60, 255).apply {
+                    duration = 900
+                    repeatMode = ValueAnimator.REVERSE
+                    repeatCount = ValueAnimator.INFINITE
+                    addUpdateListener { cardBg.setStroke(dp(2), withAlpha(C_CYAN, it.animatedValue as Int)) }
+                    start()
+                }
+                pulse = ObjectAnimator.ofPropertyValuesHolder(
+                    icon,
+                    PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.2f),
+                    PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.2f)
+                ).apply {
+                    duration = 700
+                    repeatMode = ValueAnimator.REVERSE
+                    repeatCount = ValueAnimator.INFINITE
+                    start()
+                }
+            } else {
+                card.elevation = dpf(2f)
+                card.outlineSpotShadowColor = Color.BLACK
+                card.outlineAmbientShadowColor = Color.BLACK
+                val stroke = when (data.state) {
+                    ItemState.DONE -> withAlpha(C_GREEN, 0x70)
+                    ItemState.FAILED -> withAlpha(C_RED, 0x70)
+                    else -> C_GLASS_STROKE
+                }
+                cardBg.setStroke(dp(1), stroke)
+            }
+
+            // «хлопок» галочки в момент завершения файла
+            if (!changedItem && wasState != null && wasState != ItemState.DONE && data.state == ItemState.DONE) {
+                icon.scaleX = 0.2f
+                icon.scaleY = 0.2f
+                icon.animate().scaleX(1f).scaleY(1f).setDuration(380)
+                    .setInterpolator(OvershootInterpolator(2.5f)).start()
+            }
         }
     }
 
     private inner class QueueAdapter : BaseAdapter() {
         private var data: List<QueueItem> = emptyList()
+        private val seen = HashSet<String>()
 
         fun submit(items: List<QueueItem>) {
             data = items
@@ -293,7 +640,26 @@ class MainActivity : Activity() {
                 view = convertView
                 holder = convertView.tag as RowHolder
             }
-            holder.bind(data[position])
+            val queueItem = data[position]
+            val firstTime = seen.add(queueItem.uri.toString())
+
+            if (holder.item !== queueItem) {
+                // строка переиспользована для другого файла — сбрасываем остатки анимации
+                view.animate().cancel()
+                view.alpha = 1f
+                view.translationX = 0f
+                view.translationY = 0f
+            }
+            holder.bind(queueItem)
+
+            if (firstTime) {
+                // новая строка плавно «выезжает» снизу
+                view.alpha = 0f
+                view.translationY = dpf(16f)
+                view.animate().alpha(1f).translationY(0f)
+                    .setStartDelay(minOf(position, 8) * 35L).setDuration(300)
+                    .setInterpolator(DecelerateInterpolator()).start()
+            }
             return view
         }
     }
@@ -461,7 +827,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateSaveButton() {
-        btnSave.text = "Сохранять в: ${saveLabel()}\n(нажмите, чтобы изменить)"
+        saveValue.text = saveLabel()
     }
 
     private fun pickSaveFolder() {
@@ -491,7 +857,7 @@ class MainActivity : Activity() {
     private fun showStartDialog() {
         val count = ConversionState.pendingCount()
         if (count == 0 || ConversionState.busy) return
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
             .setTitle("Файлов: $count")
             .setMessage("Сохранить MP3 в:\n${saveLabel()}")
             .setCancelable(false)
